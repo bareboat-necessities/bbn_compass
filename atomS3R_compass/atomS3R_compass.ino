@@ -1,4 +1,6 @@
 /*
+  Copyright 2026, Mikhail Grushinskiy
+
   AtomS3R Tilt-Compensated Compass + IMU Calibration Wizard
 
   - Uses AtomS3R_ImuCal.h (blob + runtime apply + axis mapping + clearM5UnifiedImuCalibration)

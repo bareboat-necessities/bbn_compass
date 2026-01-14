@@ -1,7 +1,6 @@
 #pragma once
 
 /*
-
   Copyright 2026, Mikhail Grushinskiy
 
   AtomS3R reusable IMU calibration plumbing (NVS blob + CRC, runtime apply, axis mapping,
