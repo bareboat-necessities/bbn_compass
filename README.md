@@ -20,7 +20,6 @@ Transmission of NMEA-0183 is via USB Serial at 115200 baud, with 10 Hz rate for 
 - M3 standoffs
 - USB-C to USB-A cables with small support tang on USB-C end
 
-
 ## Firmware 
 
 atomS3R_compass.ino in atomS3R is an ArduinoIDE sketch which you would need to compile and load to
@@ -33,12 +32,20 @@ For required libraries and their versions check:
 
 Calibration is performed directly on AtomS3R in three steps (follow instructions on the screen):
 
-- Accelerometer. On AtomS3R screen is a button (BntA). You will need to to device in 6 poses (still).
+- Accelerometer. On AtomS3R screen is a button (BntA). You will need to place device in 6 poses (still).
 - Gyroscope calibration is performed by putting device still with screen up.
-- Magnetometer calibration achived by rotating device around all axes for around 45 seconds.
+- Magnetometer calibration achieved by rotating device around all axes for around 45 seconds.
 - Triple press on the screen erases and restarts calibration.
 
 <p align="center">
 <img src="./images/bbn_compass_calibration.jpg?raw=true" style="width: 75%; height: auto;" alt="BBN Compass pic2" />
 </p>
 
+## Example NMEA Sentences
+
+````nmea
+$IIXDR,A,-0.4,D,PTCH*43
+$IIXDR,A,2.3,D,ROLL*79
+$IIROT,1.9,A*2E
+$IIHDM,250.4,M*21
+````
