@@ -382,7 +382,7 @@ private:
 
     heading_deg_ = wrap360_(yaw_deg_);
 
-    // ---- ROT (deg/min): gyro projected into world-Z, with stillness-gated bias removal ----
+    // ROT (deg/min): gyro projected into world-Z, with stillness-gated bias removal
     // Update a slow gyro bias estimate ONLY when still (so it doesn't "learn" real turns).
     const float g = ImuCalCfg::g_std;
     const float a_err = fabsf(a_cal_.norm() - g);
