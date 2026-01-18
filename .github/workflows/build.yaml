@@ -38,11 +38,19 @@ jobs:
           0x0 "$HOME/work/bbn_compass/bbn_compass/atomS3R_compass/build/atomS3R_compass.ino.bootloader.bin"
           0x8000 "$HOME/work/bbn_compass/bbn_compass/atomS3R_compass/build/atomS3R_compass.ino.partitions.bin"
           0xe000 "$HOME/.arduino15/packages/esp32/hardware/esp32/3.1.3/tools/partitions/boot_app0.bin"
-          0x10000 "$HOME/work/bbn_compass/bbn_compass/atomS3R_compass/build/atomS3R_compass.ino.bin"
+          0x10000 "$HOME/work/bbn_compass/bbn_compass/atomS3R_compass/build/atomS3R_compass.ino.bin";
+          $HOME/.arduino15/packages/esp32/tools/esptool_py/4.9.dev3/esptool
+          --chip esp32s3 merge_bin -o $HOME/work/bbn_compass/bbn_compass/atomS3R_compass_mahony/build/atomS3R_compass_mahony_firmware.bin
+          --flash_mode dio --flash_freq 80m --flash_size 8MB
+          0x0 "$HOME/work/bbn_compass/bbn_compass/atomS3R_compass_mahony/build/atomS3R_compass_mahony.ino.bootloader.bin"
+          0x8000 "$HOME/work/bbn_compass/bbn_compass/atomS3R_compass_mahony/build/atomS3R_compass_mahony.ino.partitions.bin"
+          0xe000 "$HOME/.arduino15/packages/esp32/hardware/esp32/3.1.3/tools/partitions/boot_app0.bin"
+          0x10000 "$HOME/work/bbn_compass/bbn_compass/atomS3R_compass_mahony/build/atomS3R_compass_mahony.ino.bin"
 
       - name: Make zip
         run: |
           ls /home/runner/work/bbn_compass/bbn_compass/atomS3R_compass/build/*.bin /home/runner/work/bbn_compass/bbn_compass/atomS3R_compass/build/*.csv | zip atomS3R_compass_bin-$(date +%Y-%m-%d).zip -j -@
+          ls /home/runner/work/bbn_compass/bbn_compass/atomS3R_compass_mahony/build/*.bin /home/runner/work/bbn_compass/bbn_compass/atomS3R_compass_mahony/build/*.csv | zip atomS3R_compass_mahony_bin-$(date +%Y-%m-%d).zip -j -@
           pwd
           ls *.zip
 
@@ -50,7 +58,7 @@ jobs:
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: atomS3R_compass_bin*.zip
+          file: atomS3R_compass*_bin*.zip
           tag: ${{ github.ref == 'refs/heads/main' && 'vTest' || github.ref }}
           overwrite: true
           file_glob: true
