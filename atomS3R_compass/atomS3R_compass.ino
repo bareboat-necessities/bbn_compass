@@ -128,7 +128,7 @@ public:
     }
     reloadBlobAndRuntime_();
 
-    // If missing, immediately run wizard once (matches your requested flow)
+    // If missing, immediately run wizard once
     if (!have_blob_) {
       Serial.println("[BOOT] No saved calibration. Starting wizard...");
       ImuCalBlobV1 saved{};
@@ -168,7 +168,7 @@ public:
 
     Input::update();
 
-    // Tap handling (same behavior as your cal app)
+    // Tap handling
     if (Input::tapPressed()) {
       tap_count_++;
       tap_deadline_ms_ = millis() + ImuCalWizardCfg::TAP_WINDOW_MS;
