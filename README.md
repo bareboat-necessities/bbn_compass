@@ -41,6 +41,10 @@ Calibration is performed directly on AtomS3R in three steps (follow instructions
 <img src="./images/bbn_compass_calibration.jpg?raw=true" style="width: 75%; height: auto;" alt="BBN Compass pic2" />
 </p>
 
+NOTE: You would need a relatively long USB cable to be
+able to rotate the device fast and freely to give more points on
+3D sphere. 
+
 ## Example NMEA Sentences
 
 ````nmea
