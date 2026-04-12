@@ -14,10 +14,10 @@
   Example boot flow:
 
     #include <M5Unified.h>
-    #include "AtomS3R_ImuCal.h"
+    #include "AtomS3R/AtomS3R_ImuCal.h"
 
     atoms3r_ical::ImuCalStoreNvs store;
-    atoms3r_ical::ImuCalBlobV1   blob;
+    atoms3r_ical::ImuCalBlobV2   blob;
     atoms3r_ical::RuntimeCals    cals;
 
     void setup() {
@@ -103,33 +103,44 @@ struct ImuCalCfg {
 };
 
 // Axis mapping (AtomS3R)
+//
+// Internal convention in this library is BODY-NED (x=north, y=east, z=down).
+// End-user "nautical Z-up" is therefore z_up = -z_down.
+//
+// With the board lying still, screen facing up:
+//   - accelerometer body Z (down) is expected near -g specific force
+//   - user-facing Z-up value is the opposite sign.
 // acc_body = ( ay, ax, -az ) * g
 // gyr_body = ( gy, gx, -gz ) * deg2rad
 // mag_body = ( my, mx, -mz ) * (1/10)
+static inline Vector3f map_sensor_xyz_to_body_ned_(float sx, float sy, float sz, float scale = 1.0f) {
+  return Vector3f(sy * scale, sx * scale, -sz * scale);
+}
+
+static inline Vector3f map_sensor_vec_to_body_ned_(const Vector3f& v_sensor, float scale = 1.0f) {
+  return map_sensor_xyz_to_body_ned_(v_sensor.x(), v_sensor.y(), v_sensor.z(), scale);
+}
+
 static inline Vector3f map_acc_to_body_ned_(const m5::imu_3d_t& a_g) {
-  return Vector3f(a_g.y * ImuCalCfg::g_std,
-                  a_g.x * ImuCalCfg::g_std,
-                 -a_g.z * ImuCalCfg::g_std);
+  return map_sensor_xyz_to_body_ned_(a_g.x, a_g.y, a_g.z, ImuCalCfg::g_std);
 }
 static inline Vector3f map_gyr_to_body_ned_(const m5::imu_3d_t& w_deg_s) {
-  return Vector3f(w_deg_s.y * ImuCalCfg::DEG2RAD,
-                  w_deg_s.x * ImuCalCfg::DEG2RAD,
-                 -w_deg_s.z * ImuCalCfg::DEG2RAD);
+  return map_sensor_xyz_to_body_ned_(w_deg_s.x, w_deg_s.y, w_deg_s.z, ImuCalCfg::DEG2RAD);
 }
 static inline Vector3f map_mag_to_body_uT_(const m5::imu_3d_t& m_raw) {
-  return Vector3f(m_raw.y / 10.0f,
-                  m_raw.x / 10.0f,
-                 -m_raw.z / 10.0f);
+  return map_sensor_xyz_to_body_ned_(m_raw.x, m_raw.y, m_raw.z, 0.1f);
 }
 
 // Blob + CRC utilities
-struct ImuCalBlobV1 {
+struct ImuCalBlobV2 {
   static constexpr uint32_t IMU_CAL_MAGIC   = 0x434C554D; // 'MULC'
-  static constexpr uint16_t IMU_CAL_VERSION = 1;
+  static constexpr uint16_t IMU_CAL_VERSION = 2;
+  static constexpr uint8_t  IMU_CAL_MODE_M5_IMU_API = 1;
 
   uint32_t magic = IMU_CAL_MAGIC;
   uint16_t version = IMU_CAL_VERSION;
-  uint16_t size_bytes = sizeof(ImuCalBlobV1);
+  uint16_t size_bytes = sizeof(ImuCalBlobV2);
+  uint8_t  build_mode = 0;
 
   uint8_t  accel_ok = 0;
   float    accel_g = ImuCalCfg::g_std;
@@ -152,7 +163,7 @@ struct ImuCalBlobV1 {
 
   uint32_t crc = 0;
 };
-static constexpr size_t IMU_CAL_CRC_LEN = offsetof(ImuCalBlobV1, crc);
+static constexpr size_t IMU_CAL_CRC_LEN = offsetof(ImuCalBlobV2, crc);
 
 static inline uint32_t crc32_ieee_(const uint8_t* data, size_t n) {
   uint32_t crc = 0xFFFFFFFFu;
@@ -180,16 +191,18 @@ static inline void mat_to_rowmajor9_(const Matrix3f& M, float a[9]) {
   a[6]=M(2,0); a[7]=M(2,1); a[8]=M(2,2);
 }
 
-static inline uint32_t computeBlobCrc(const ImuCalBlobV1& in) {
-  ImuCalBlobV1 tmp = in;
+static inline uint32_t computeBlobCrc(const ImuCalBlobV2& in) {
+  ImuCalBlobV2 tmp = in;
   tmp.crc = 0;
   return crc32_ieee_((const uint8_t*)&tmp, IMU_CAL_CRC_LEN);
 }
 
-static inline bool validateBlob(const ImuCalBlobV1& b) {
-  if (b.magic != ImuCalBlobV1::IMU_CAL_MAGIC) return false;
-  if (b.version != ImuCalBlobV1::IMU_CAL_VERSION) return false;
-  if (b.size_bytes != sizeof(ImuCalBlobV1)) return false;
+static inline bool validateBlob(const ImuCalBlobV2& b) {
+  if (b.magic != ImuCalBlobV2::IMU_CAL_MAGIC) return false;
+  if (b.version != ImuCalBlobV2::IMU_CAL_VERSION) return false;
+  if (b.size_bytes != sizeof(ImuCalBlobV2)) return false;
+  const uint8_t expected_mode = ImuCalBlobV2::IMU_CAL_MODE_M5_IMU_API;
+  if (b.build_mode != expected_mode) return false;
   const uint32_t want = b.crc;
   return (computeBlobCrc(b) == want);
 }
@@ -197,38 +210,48 @@ static inline bool validateBlob(const ImuCalBlobV1& b) {
 // NVS store (Preferences)
 class ImuCalStoreNvs {
 public:
-  // Namespace/key kept stable so different sketches share the same saved cal.
-  // If you want per-app separation, change these strings.
+  // Namespace kept stable so different sketches share saved cals.
   static constexpr const char* kNamespace = "imu_cal";
-  static constexpr const char* kKey       = "blob";
+  static constexpr const char* kKeyLegacy = "blob";
+  static constexpr const char* kKeyM5ImuApi = "blob_m5";
 
-  bool load(ImuCalBlobV1& out) {
-    Preferences prefs;
-    prefs.begin(kNamespace, true);
-    size_t n = prefs.getBytesLength(kKey);
-    if (n != sizeof(ImuCalBlobV1)) { prefs.end(); return false; }
+  static constexpr const char* modeKey() {
+    return kKeyM5ImuApi;
+  }
 
-    ImuCalBlobV1 tmp;
-    size_t got = prefs.getBytes(kKey, &tmp, sizeof(tmp));
-    prefs.end();
+  bool loadByKey_(Preferences& prefs, const char* key, ImuCalBlobV2& out) {
+    size_t n = prefs.getBytesLength(key);
+    if (n != sizeof(ImuCalBlobV2)) return false;
+
+    ImuCalBlobV2 tmp;
+    size_t got = prefs.getBytes(key, &tmp, sizeof(tmp));
     if (got != sizeof(tmp)) return false;
-
     if (!validateBlob(tmp)) return false;
+
     out = tmp;
     return true;
   }
 
-  bool save(const ImuCalBlobV1& in) {
-    ImuCalBlobV1 tmp = in;
-    tmp.magic = ImuCalBlobV1::IMU_CAL_MAGIC;
-    tmp.version = ImuCalBlobV1::IMU_CAL_VERSION;
-    tmp.size_bytes = sizeof(ImuCalBlobV1);
+  bool load(ImuCalBlobV2& out) {
+    Preferences prefs;
+    prefs.begin(kNamespace, true);
+    const bool ok = loadByKey_(prefs, modeKey(), out) || loadByKey_(prefs, kKeyLegacy, out);
+    prefs.end();
+    return ok;
+  }
+
+  bool save(const ImuCalBlobV2& in) {
+    ImuCalBlobV2 tmp = in;
+    tmp.magic = ImuCalBlobV2::IMU_CAL_MAGIC;
+    tmp.version = ImuCalBlobV2::IMU_CAL_VERSION;
+    tmp.size_bytes = sizeof(ImuCalBlobV2);
+    tmp.build_mode = ImuCalBlobV2::IMU_CAL_MODE_M5_IMU_API;
     tmp.crc = 0;
     tmp.crc = computeBlobCrc(tmp);
 
     Preferences prefs;
     prefs.begin(kNamespace, false);
-    size_t wrote = prefs.putBytes(kKey, &tmp, sizeof(tmp));
+    size_t wrote = prefs.putBytes(modeKey(), &tmp, sizeof(tmp));
     prefs.end();
     return (wrote == sizeof(tmp));
   }
@@ -236,7 +259,7 @@ public:
   void erase() {
     Preferences prefs;
     prefs.begin(kNamespace, false);
-    prefs.remove(kKey);
+    prefs.remove(modeKey());
     prefs.end();
   }
 };
@@ -247,7 +270,7 @@ struct RuntimeCals {
   imu_cal::GyroCalibration<float>  gyr{};
   imu_cal::MagCalibration<float>   mag{};
 
-  void rebuildFromBlob(const ImuCalBlobV1& b) {
+  void rebuildFromBlob(const ImuCalBlobV2& b) {
     acc.ok = (b.accel_ok != 0);
     acc.g  = b.accel_g;
     acc.S  = mat_from_rowmajor9_(b.accel_S);
@@ -273,7 +296,11 @@ struct RuntimeCals {
 
   Vector3f applyAccel(const Vector3f& a_raw, float tempC) const { return acc.ok ? acc.apply(a_raw, tempC) : a_raw; }
   Vector3f applyGyro (const Vector3f& w_raw, float tempC) const { return gyr.ok ? gyr.apply(w_raw, tempC) : w_raw; }
-  Vector3f applyMag  (const Vector3f& m_raw) const { return mag.ok ? mag.apply(m_raw) : m_raw; }
+  Vector3f applyMag  (const Vector3f& m_raw) const {
+    if (!mag.ok) return m_raw;
+    const Vector3f m_cal = mag.apply(m_raw);
+    return m_cal.allFinite() ? m_cal : m_raw;
+  }
 };
 
 // Pretty 3x3 print from row-major float[9].
@@ -318,11 +345,14 @@ static inline void printMatHeader(Print& out, const char* name, const char* mean
 }
 
 // Print helpers (startup serial)
-static inline void printBlobSummary(Print& out, const ImuCalBlobV1& b) {
+static inline void printBlobSummary(Print& out, const ImuCalBlobV2& b) {
+  const char* mode = "unknown";
+  if (b.build_mode == ImuCalBlobV2::IMU_CAL_MODE_M5_IMU_API) mode = "m5_imu_api";
+  out.printf("  build_mode: %s\n", mode);
   out.printf("  ok: A=%d G=%d M=%d\n", (int)b.accel_ok, (int)b.gyro_ok, (int)b.mag_ok);
 }
 
-static inline void printBlobDetail(Print& out, const ImuCalBlobV1& b) {
+static inline void printBlobDetail(Print& out, const ImuCalBlobV2& b) {
   // ACCEL
   out.printf("  accel: g=%.6f T0=%.2f rms_mag=%.4f\n", (double)b.accel_g, (double)b.accel_T0, (double)b.accel_rms_mag);
   out.printf("    b0=[%.5f %.5f %.5f]\n", (double)b.accel_b0[0], (double)b.accel_b0[1], (double)b.accel_b0[2]);
@@ -359,12 +389,36 @@ struct ImuSample {
   Vector3f m;     // uT     (mapped to body)
   float tempC;    // deg C
   uint32_t mask;  // M5.Imu.update() mask
+  uint32_t sample_us; // micros() timestamp captured at imu.update()
 };
 
+#ifndef ATOMS3R_IMU_MASK_ACCEL
+  #if defined(M5IMU_UPDATE_ACCEL)
+    #define ATOMS3R_IMU_MASK_ACCEL M5IMU_UPDATE_ACCEL
+  #elif defined(IMU_UPDATE_ACCEL)
+    #define ATOMS3R_IMU_MASK_ACCEL IMU_UPDATE_ACCEL
+  #else
+    #define ATOMS3R_IMU_MASK_ACCEL (1u << 0)
+  #endif
+#endif
+
+#ifndef ATOMS3R_IMU_MASK_GYRO
+  #if defined(M5IMU_UPDATE_GYRO)
+    #define ATOMS3R_IMU_MASK_GYRO M5IMU_UPDATE_GYRO
+  #elif defined(IMU_UPDATE_GYRO)
+    #define ATOMS3R_IMU_MASK_GYRO IMU_UPDATE_GYRO
+  #else
+    #define ATOMS3R_IMU_MASK_GYRO (1u << 1)
+  #endif
+#endif
+
+static constexpr uint32_t kImuMaskAccelGyro = (ATOMS3R_IMU_MASK_ACCEL | ATOMS3R_IMU_MASK_GYRO);
+
 // Reads M5.Imu, applies AtomS3R axis mapping and unit conversion, but does NOT calibrate.
-static inline bool readImuMapped(decltype(M5.Imu)& imu, ImuSample& out) {
-  out.mask = imu.update();
-  if (!out.mask) return false;
+static inline bool readImuMapped(decltype(M5.Imu)& imu, uint32_t update_mask, uint32_t sample_us, ImuSample& out) {
+  out.sample_us = sample_us;
+  out.mask = update_mask;
+  if ((out.mask & kImuMaskAccelGyro) != kImuMaskAccelGyro) return false;
 
   const auto data = imu.getImuData();
   out.tempC = NAN;
@@ -377,6 +431,12 @@ static inline bool readImuMapped(decltype(M5.Imu)& imu, ImuSample& out) {
   out.m = map_mag_to_body_uT_(data.mag);
 
   return true;
+}
+
+static inline bool readImuMapped(decltype(M5.Imu)& imu, ImuSample& out) {
+  const uint32_t sample_us = micros();
+  const uint32_t update_mask = imu.update();
+  return readImuMapped(imu, update_mask, sample_us, out);
 }
 
 // "No collisions" helper

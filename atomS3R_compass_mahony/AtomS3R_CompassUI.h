@@ -1,9 +1,7 @@
 #pragma once
 
 /*
-
   Copyright 2026, Mikhail Grushinskiy
-
 */
 
 #include <M5Unified.h>
@@ -238,7 +236,8 @@ void loop() {
   M5.update();
 
   if (M5.Imu.update()) {
-    // getImuData includes accel/gyro/mag  [oai_citation:5‡m5stack.oss-cn-shenzhen.aliyuncs.com](https://m5stack.oss-cn-shenzhen.aliyuncs.com/resource/docs/static/pdf/static/en/arduino/m5unified/imu_class.pdf)
+    // getImuData includes accel/gyro/mag
+    // [oai_citation:5‡m5stack.oss-cn-shenzhen.aliyuncs.com](https://m5stack.oss-cn-shenzhen.aliyuncs.com/resource/docs/static/pdf/static/en/arduino/m5unified/imu_class.pdf)
     auto d = M5.Imu.getImuData();
 
     // Very basic “flat” heading (no tilt compensation):

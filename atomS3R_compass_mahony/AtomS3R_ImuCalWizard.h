@@ -5,55 +5,7 @@
 
   AtomS3R IMU calibration wizard UI (Accel + Gyro + Mag) using imu_cal::* calibrators.
 
-  Depends on:
-    - AtomS3R_ImuCal.h (blob/store/runtime + mapping/read + clearM5UnifiedImuCalibration())
-
-  Typical usage (boot flow):
-
-    #include <M5Unified.h>
-    #include "AtomS3R_ImuCal.h"
-    #include "AtomS3R_ImuCalWizard.h"
-
-    atoms3r_ical::ImuCalStoreNvs    store;
-    atoms3r_ical::ImuCalBlobV1      blob;
-    atoms3r_ical::RuntimeCals       cals;
-    atoms3r_ical::M5Ui              ui;
-    atoms3r_ical::ImuCalWizard      wiz(ui, store);
-
-    void setup() {
-      Serial.begin(115200);
-      delay(150);
-      Serial.println();
-
-      auto cfg = M5.config();
-      M5.begin(cfg);
-
-      // Clear M5Unified cal so it doesn't stack with ours.
-      atoms3r_ical::clearM5UnifiedImuCalibration();
-
-      ui.begin();
-
-      if (!M5.Imu.isEnabled()) { Serial.println("IMU missing"); while(true) delay(100); }
-
-      bool have = store.load(blob);
-      if (have) {
-        Serial.println("[BOOT] Found saved calibration:");
-        atoms3r_ical::printBlobSummary(Serial, blob);
-        atoms3r_ical::printBlobDetail(Serial, blob);
-        cals.rebuildFromBlob(blob);
-      } else {
-        Serial.println("[BOOT] No calibration -> starting wizard");
-        atoms3r_ical::ImuCalBlobV1 out{};
-        if (wiz.runAndSave(out)) {
-          Serial.println("[BOOT] Wizard saved calibration:");
-          atoms3r_ical::printBlobSummary(Serial, out);
-          cals.rebuildFromBlob(out);
-        } else {
-          Serial.println("[BOOT] Wizard failed or not saved");
-        }
-      }
-    }
-
+  Uses M5Unified IMU API as the IMU sample source.
 */
 
 #include <Arduino.h>
@@ -62,13 +14,15 @@
 #include <stdint.h>
 #include <string.h>
 #include <math.h>
+#include <limits>
+#include <algorithm>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
-#include "AtomS3R_ImuCal.h"   // blob/store/read/mapping/clearM5UnifiedImuCalibration()
-#include "AtomS3R_M5Ui.h"
-#include "CalibrateIMU.h"     // imu_cal::* + FitFail
+#include "AtomS3R_ImuCal.h"         // ImuSample, axis mapping conventions, blob/store/runtime helpers
+#include "AtomS3R_M5Ui.h"           // UI + Input + clamp01_
+#include "CalibrateIMU.h"           // imu_cal::* + FitFail
 
 namespace atoms3r_ical {
 
@@ -98,22 +52,23 @@ struct ImuCalWizardCfg {
   static constexpr uint32_t MAG_MIN_TIME_MS       = 45000;  // require >= 45 seconds of motion
 
   // MAG stale-repeat reject
-  static constexpr float MAG_MIN_DELTA_uT         = 0.03f;
+  static constexpr float MAG_MIN_DELTA_uT       = 0.03f;
 
   // MAG coverage requirements (ratio-based, unitless)
-  static constexpr float MAG_SPAN_MIN_FRAC        = 0.35f;
-  static constexpr float MAG_SPAN_MID_FRAC        = 0.55f;
+  static constexpr float MAG_SPAN_MIN_FRAC      = 0.35f;
+  static constexpr float MAG_SPAN_MID_FRAC      = 0.55f;
 
-  // Also require centered direction range per axis (0..2). 1.2 means roughly reaching ±0.6.
-  static constexpr float MAG_URANGE_TARGET        = 1.05f;
+  // Also require centered direction range per axis (0..2). 1.05 means roughly reaching ±0.525.
+  static constexpr float MAG_URANGE_TARGET      = 1.05f;
 
-  static constexpr uint32_t FIT_STACK_WORDS     = 16384;
+  // FreeRTOS stack:
+  static constexpr uint32_t FIT_STACK_BYTES     = 32768;
+  static constexpr uint32_t FIT_STACK_WORDS     = FIT_STACK_BYTES / sizeof(StackType_t);
+
   static constexpr uint32_t FIT_TIMEOUT_MS      = 30000;
 };
 
 // Small helpers
-static inline int32_t i32_max_(int32_t a, int32_t b) { return (a > b) ? a : b; }
-
 static inline uint8_t rot_add_(uint8_t base, int delta) {
   int r = (int)base + delta;
   r %= 4;
@@ -169,7 +124,7 @@ static inline float unit_dir_cov_det_(const Vector3f* x, int n) {
   return detC;
 }
 
-// Wizard
+// Wizard pose descriptor
 struct Pose {
   const char* short_name;
   const char* instruction;
@@ -178,11 +133,12 @@ struct Pose {
 
 class ImuCalWizard {
 public:
-  ImuCalWizard(M5Ui& ui, ImuCalStoreNvs& store) : ui_(ui), store_(store) {}
+  ImuCalWizard(M5Ui& ui, ImuCalStoreNvs& store)
+  : ui_(ui), store_(store) {}
 
   // Runs full wizard and saves to NVS. Returns true only if saved successfully.
-  // If out_saved is provided, it is filled with the saved blob (readback-validated).
-  bool runAndSave(ImuCalBlobV1& out_saved) {
+  // out_saved is filled with the saved blob (readback-validated).
+  bool runAndSave(ImuCalBlobV2& out_saved) {
     Serial.println("[WIZ] start");
 
     for (;;) {
@@ -230,22 +186,56 @@ public:
       }
       if (!runFitTask_(FitKind::GYRO, "GYRO", true)) return false;
 
+      // If mag is unavailable, skip MAG stage cleanly.
+      if (!magAvailable_()) {
+        Serial.println("[MAG] unavailable -> skipping mag calibration");
+        mag_out_.ok = false;
+        // Build + save blob (accel+gyro only)
+        ImuCalBlobV2 blob{};
+        fillBlob_(blob);
+        blob.mag_ok = 0;
+
+        ui_.setReadRotation();
+        ui_.title("SAVE");
+        ui_.line("Writing...");
+        const bool wrote = store_.save(blob);
+
+        ImuCalBlobV2 rb{};
+        const bool okrb = store_.load(rb);
+
+        Serial.printf("[SAVE] wrote=%d readback=%d\n", (int)wrote, (int)okrb);
+        if (!wrote || !okrb) {
+          ui_.fail("SAVE", "Write/readback fail");
+          return false;
+        }
+
+        out_saved = rb;
+
+        ui_.title("DONE");
+        M5.Display.printf("A:%d G:%d M:%d\n", (int)rb.accel_ok, (int)rb.gyro_ok, (int)rb.mag_ok);
+        ui_.line("Saved OK");
+        ui_.line("");
+        ui_.line("Tap BtnA");
+        while (true) { Input::update(); if (Input::tapPressed()) break; delay(10); }
+
+        Serial.println("[WIZ] done");
+        return true;
+      }
+
       // MAG stage with retry loop
       while (true) {
         magCal_.clear();
 
         const char* cap_why = nullptr;
         if (!captureMag_(cap_why)) {
-          auto act = ui_.magFailMenu(cap_why ? cap_why : "Capture failed",
-                                     "Flip + roll + pitch");
+          auto act = ui_.magFailMenu(cap_why ? cap_why : "Capture failed", "Flip + roll + pitch");
           if (act == M5Ui::MagFailAction::RETRY_MAG) continue;
           if (act == M5Ui::MagFailAction::REDO_ALL) { redo_all = true; break; }
           return false;
         }
 
         if (magCal_.buf.n < ImuCalWizardCfg::MAG_MIN_TO_FIT) {
-          auto act = ui_.magFailMenu("Too few accepted",
-                                     "Rotate longer / slower");
+          auto act = ui_.magFailMenu("Too few accepted", "Rotate longer / slower");
           if (act == M5Ui::MagFailAction::RETRY_MAG) continue;
           if (act == M5Ui::MagFailAction::REDO_ALL) { redo_all = true; break; }
           return false;
@@ -264,7 +254,6 @@ public:
           if (act == M5Ui::MagFailAction::REDO_ALL) { redo_all = true; break; }
           return false;
         }
-
         break; // MAG succeeded
       }
 
@@ -274,17 +263,17 @@ public:
       }
 
       // Build blob from fitted calibrations
-      ImuCalBlobV1 blob{};
+      ImuCalBlobV2 blob{};
       fillBlob_(blob);
 
       ui_.setReadRotation();
       ui_.title("SAVE");
       ui_.line("Writing...");
-      bool wrote = store_.save(blob);
+      const bool wrote = store_.save(blob);
 
       // Readback validation (also ensures CRC correctness)
-      ImuCalBlobV1 rb{};
-      bool okrb = store_.load(rb);
+      ImuCalBlobV2 rb{};
+      const bool okrb = store_.load(rb);
 
       Serial.printf("[SAVE] wrote=%d readback=%d\n", (int)wrote, (int)okrb);
 
@@ -321,17 +310,23 @@ private:
     TaskHandle_t  task = nullptr;
   } fit_{};
 
+  static uint32_t hwmBytes_() {
+    const uint32_t words = (uint32_t)uxTaskGetStackHighWaterMark(nullptr);
+    return words * (uint32_t)sizeof(StackType_t);
+  }
+
   static void fitTaskAccel_(void* p) {
     FitCtx* ctx = (FitCtx*)p;
     ImuCalWizard* self = ctx->wiz;
 
     ctx->reason = imu_cal::FitFail::BAD_ARG;
-    bool ok = self->accelCal_.fit(self->acc_out_, 3, 0.15f, &ctx->reason);
+    const bool ok = self->accelCal_.fit(self->acc_out_, 3, 0.15f, &ctx->reason);
 
-    Serial.printf("[ACC] fit=%d ok=%d reason=%s\n",
+    Serial.printf("[ACC] fit=%d out.ok=%d reason=%s\n",
                   (int)ok, (int)self->acc_out_.ok, imu_cal::fitFailStr(ctx->reason));
 
     ctx->ok = ok && self->acc_out_.ok;
+    Serial.printf("[ACC] stack_hwm=%luB\n", (unsigned long)hwmBytes_());
     ctx->done = true;
     vTaskDelete(nullptr);
   }
@@ -341,12 +336,13 @@ private:
     ImuCalWizard* self = ctx->wiz;
 
     ctx->reason = imu_cal::FitFail::BAD_ARG;
-    bool ok = self->gyroCal_.fit(self->gyr_out_, &ctx->reason);
+    const bool ok = self->gyroCal_.fit(self->gyr_out_, &ctx->reason);
 
-    Serial.printf("[GYR] fit=%d ok=%d reason=%s\n",
+    Serial.printf("[GYR] fit=%d out.ok=%d reason=%s\n",
                   (int)ok, (int)self->gyr_out_.ok, imu_cal::fitFailStr(ctx->reason));
 
     ctx->ok = ok && self->gyr_out_.ok;
+    Serial.printf("[GYR] stack_hwm=%luB\n", (unsigned long)hwmBytes_());
     ctx->done = true;
     vTaskDelete(nullptr);
   }
@@ -355,7 +351,6 @@ private:
     FitCtx* ctx = (FitCtx*)p;
     ImuCalWizard* self = ctx->wiz;
 
-    // Try a few combinations (helps with MODEL_S_NONPOSITIVE sometimes)
     struct Try { int iters; float trim; float ridge; };
     const Try tries[] = {
       {3, 0.15f, 1e-6f},
@@ -370,11 +365,11 @@ private:
 
     for (size_t i = 0; i < sizeof(tries)/sizeof(tries[0]); ++i) {
       imu_cal::FitFail r = imu_cal::FitFail::BAD_ARG;
-      bool ok = self->magCal_.fit(self->mag_out_, tries[i].iters, tries[i].trim, tries[i].ridge, &r);
+      const bool ok = self->magCal_.fit(self->mag_out_, tries[i].iters, tries[i].trim, tries[i].ridge, &r);
 
       Serial.printf("[MAG] try iters=%d trim=%.3f ridge=%.1e -> fit=%d out.ok=%d reason=%s\n",
-                   tries[i].iters, (double)tries[i].trim, (double)tries[i].ridge,
-                   (int)ok, (int)self->mag_out_.ok, imu_cal::fitFailStr(r));
+                    tries[i].iters, (double)tries[i].trim, (double)tries[i].ridge,
+                    (int)ok, (int)self->mag_out_.ok, imu_cal::fitFailStr(r));
 
       last_reason = r;
       if (ok && self->mag_out_.ok) { any_ok = true; break; }
@@ -382,6 +377,11 @@ private:
 
     ctx->reason = last_reason;
     ctx->ok = any_ok;
+
+    const uint32_t hw = hwmBytes_();
+    Serial.printf("[MAG] stack_hwm=%luB\n", (unsigned long)hw);
+    if (hw < 4096) Serial.printf("[MAG] WARN: low stack headroom: %luB\n", (unsigned long)hw);
+
     ctx->done = true;
     vTaskDelete(nullptr);
   }
@@ -408,10 +408,10 @@ private:
     }
 
     // Pin FIT to core 0 (avoid starving loopTask on core 1)
-    BaseType_t rc = xTaskCreatePinnedToCore(
+    const BaseType_t rc = xTaskCreatePinnedToCore(
       fn,
       what,
-      (uint32_t)ImuCalWizardCfg::FIT_STACK_WORDS,
+      (uint32_t)ImuCalWizardCfg::FIT_STACK_WORDS, // FreeRTOS (StackType_t)
       &fit_,
       1,
       &fit_.task,
@@ -423,13 +423,13 @@ private:
       return false;
     }
 
-    uint32_t t0 = millis();
+    const uint32_t t0 = millis();
     float ph = 0.f;
 
     while (!fit_.done) {
       Input::update();
 
-      if (millis() - t0 > ImuCalWizardCfg::FIT_TIMEOUT_MS) {
+      if ((uint32_t)(millis() - t0) > ImuCalWizardCfg::FIT_TIMEOUT_MS) {
         vTaskDelete(fit_.task);
         fit_.task = nullptr;
         if (show_fail) ui_.fail("FIT", "Timeout");
@@ -450,35 +450,72 @@ private:
     return true;
   }
 
+  bool magAvailable_() {
+    // Actively probe MAG so we can skip calibration cleanly when
+    // magnetometer data is unavailable/stuck.
+    Vector3f m = Vector3f::Zero();
+    bool have_prev = false;
+    Vector3f prev = Vector3f::Zero();
+    constexpr uint32_t probe_ms = 1200;
+    const uint32_t t0 = millis();
+
+    while ((uint32_t)(millis() - t0) < probe_ms) {
+      if (!readMagSample_(m)) {
+        delay(4);
+        continue;
+      }
+      const float mn = m.norm();
+      if (!(mn > 1.0f) || !std::isfinite(mn)) {
+        delay(4);
+        continue;
+      }
+      if (have_prev) {
+        const float dm = (m - prev).norm();
+        if (std::isfinite(dm) && dm >= ImuCalWizardCfg::MAG_MIN_DELTA_uT) {
+          return true;
+        }
+      }
+      prev = m;
+      have_prev = true;
+      delay(4);
+    }
+    return false;
+  }
+
   // Capture steps
   bool readSample_(ImuSample& s) {
-    // Uses the mapping/read function from AtomS3R_ImuCal.h
     return readImuMapped(M5.Imu, s);
   }
 
+  bool readMagSample_(Vector3f& m_out) {
+    (void)M5.Imu.update();
+    const auto data = M5.Imu.getImuData();
+    m_out = map_mag_to_body_uT_(data.mag);
+    return finite3_(m_out);
+  }
+
   void configureCalibrators_() {
-    // Use the SAME g that mapping uses (AtomS3R_ImuCal.h)
     const float g = ImuCalCfg::g_std;
 
     accelCal_.g = g;
     gyroCal_.g  = g;
 
-    // Keep gates reasonable (too tight can bias fits / stall capture)
+    // Gates
     accelCal_.accel_mag_tol       = 0.8f;   // m/s^2
     accelCal_.max_gyro_for_static = 0.12f;  // rad/s
 
     gyroCal_.max_accel_dev = 0.8f;          // m/s^2
     gyroCal_.max_gyro_norm = 0.12f;         // rad/s
 
-    // Allow symmetric cross-axis correction
+    // Symmetric cross-axis correction
     using AC = imu_cal::AccelCalibrator<float, 400, 1>;
     accelCal_.accel_S_mode = AC::AccelSMode::PolarSPD;
 
-    // Plausibility gates (tweakable)
+    // Plausibility gates
     accelCal_.accel_diag_lo = 0.80f;
     accelCal_.accel_diag_hi = 1.25f;
     accelCal_.accel_max_cond = 6.0f;
-    accelCal_.accel_max_offdiag_rms = 0.10f; // allow some coupling correction
+    accelCal_.accel_max_offdiag_rms = 0.10f;
   }
 
   bool captureAccelPose_(const Pose& p) {
@@ -492,25 +529,25 @@ private:
     ui_.line("Place now");
     ui_.line("Hold still");
 
-    uint32_t t0 = millis();
-    while (millis() - t0 < ImuCalWizardCfg::PLACE_TIME_MS) {
+    const uint32_t t0 = millis();
+    while ((uint32_t)(millis() - t0) < ImuCalWizardCfg::PLACE_TIME_MS) {
       Input::update();
       ui_.bar01((float)(millis() - t0) / (float)ImuCalWizardCfg::PLACE_TIME_MS);
-      delay(30);
+      delay(40);
     }
 
-    int start_n  = accelCal_.buf.n;
-    int target_n = start_n + ImuCalWizardCfg::ACCEL_NEED_PER_POSE;
+    const int start_n  = accelCal_.buf.n;
+    const int target_n = start_n + ImuCalWizardCfg::ACCEL_NEED_PER_POSE;
 
     ui_.title("ACCEL");
     ui_.line(p.short_name);
     ui_.line("Capturing...");
 
-    uint32_t tcap0 = millis();
+    const uint32_t tcap0 = millis();
     uint32_t last_change = millis();
     int last_n = accelCal_.buf.n;
 
-    while (millis() - tcap0 < ImuCalWizardCfg::ACCEL_TIMEOUT_MS) {
+    while ((uint32_t)(millis() - tcap0) < ImuCalWizardCfg::ACCEL_TIMEOUT_MS) {
       Input::update();
 
       ImuSample s;
@@ -518,10 +555,10 @@ private:
 
       accelCal_.addSample(s.a, s.w, s.tempC);
 
-      int n = accelCal_.buf.n;
+      const int n = accelCal_.buf.n;
       if (n != last_n) { last_n = n; last_change = millis(); }
 
-      if (millis() - last_change > ImuCalWizardCfg::STUCK_MS) {
+      if ((uint32_t)(millis() - last_change) > ImuCalWizardCfg::STUCK_MS) {
         Serial.printf("[ACC] stuck pose='%s' got=%d\n", p.short_name, n - start_n);
         ui_.setReadRotation();
         ui_.fail("ACCEL", "No samples accepted");
@@ -555,35 +592,35 @@ private:
     ui_.line("Place on table");
     ui_.line("Do NOT touch");
 
-    uint32_t t0 = millis();
-    while (millis() - t0 < ImuCalWizardCfg::PLACE_TIME_MS) {
+    const uint32_t t0 = millis();
+    while ((uint32_t)(millis() - t0) < ImuCalWizardCfg::PLACE_TIME_MS) {
       Input::update();
       ui_.bar01((float)(millis() - t0) / (float)ImuCalWizardCfg::PLACE_TIME_MS);
       delay(30);
     }
 
-    int start_n  = gyroCal_.buf.n;
-    int target_n = start_n + ImuCalWizardCfg::GYRO_NEED;
+    const int start_n  = gyroCal_.buf.n;
+    const int target_n = start_n + ImuCalWizardCfg::GYRO_NEED;
 
     ui_.title("GYRO");
     ui_.line("Capturing...");
 
-    uint32_t tcap0 = millis();
+    const uint32_t tcap0 = millis();
     uint32_t last_change = millis();
     int last_n = gyroCal_.buf.n;
 
-    while (millis() - tcap0 < ImuCalWizardCfg::GYRO_TIMEOUT_MS) {
+    while ((uint32_t)(millis() - tcap0) < ImuCalWizardCfg::GYRO_TIMEOUT_MS) {
       Input::update();
 
       ImuSample s;
-      if (!readSample_(s)) { delay(2); continue; }
+      if (!readSample_(s)) { delay(4); continue; }
 
       gyroCal_.addSample(s.w, s.a, s.tempC);
 
-      int n = gyroCal_.buf.n;
+      const int n = gyroCal_.buf.n;
       if (n != last_n) { last_n = n; last_change = millis(); }
 
-      if (millis() - last_change > ImuCalWizardCfg::STUCK_MS) {
+      if ((uint32_t)(millis() - last_change) > ImuCalWizardCfg::STUCK_MS) {
         Serial.printf("[GYR] stuck got=%d\n", n - start_n);
         ui_.fail("GYRO", "No samples accepted");
         return false;
@@ -607,10 +644,15 @@ private:
   bool captureMag_(const char*& out_why) {
     out_why = nullptr;
 
+    if (!magAvailable_()) {
+      out_why = "MAG unavailable";
+      return false;
+    }
+
     ui_.waitTap("MAG", "Rotate ~45 sec", "Tap to start");
 
-    int start_n  = magCal_.buf.n;
-    int target_n = start_n + ImuCalWizardCfg::MAG_NEED;
+    const int start_n  = magCal_.buf.n;
+    const int target_n = start_n + ImuCalWizardCfg::MAG_NEED;
 
     ui_.setReadRotation();
     ui_.title("MAG");
@@ -618,12 +660,12 @@ private:
     ui_.line("Flip all faces");
     ui_.line("Avoid metal");
 
-    uint32_t tcap0 = millis();
+    const uint32_t tcap0 = millis();
     uint32_t last_change = millis();
     int last_n = magCal_.buf.n;
 
     uint32_t last_add_ms = 0;
-    Vector3f last_added = Vector3f(NAN, NAN, NAN);
+    Vector3f last_added(NAN, NAN, NAN);
 
     // Raw bounds
     Vector3f vmin(+1e9f, +1e9f, +1e9f);
@@ -634,44 +676,46 @@ private:
     Vector3f umax(-1e9f, -1e9f, -1e9f);
     Vector3f center = Vector3f::Zero();
 
-    while (millis() - tcap0 < ImuCalWizardCfg::MAG_TIMEOUT_MS) {
+    while ((uint32_t)(millis() - tcap0) < ImuCalWizardCfg::MAG_TIMEOUT_MS) {
       Input::update();
 
-      ImuSample s;
-      if (!readSample_(s)) { delay(2); continue; }
-      if (!finite3_(s.m)) { delay(2); continue; }
+      Vector3f m;
+      if (!readMagSample_(m)) {
+        // During startup/recovery the mag path may briefly report NaN/Inf.
+        // Treat this as "no usable sample yet" rather than a hard failure.
+        delay(2);
+        continue;
+      }
 
-      uint32_t now = millis();
+      const uint32_t now = millis();
 
       // downsample accepted samples
       if (last_add_ms == 0 || (uint32_t)(now - last_add_ms) >= ImuCalWizardCfg::MAG_SAMPLE_SPACING_MS) {
-        // reject stale repeats (prevents instant fill with identical data)
+        // reject stale repeats
         bool accept = true;
         if (isfinite(last_added.x())) {
-          Vector3f d = s.m - last_added;
+          const Vector3f d = m - last_added;
           if (d.norm() < ImuCalWizardCfg::MAG_MIN_DELTA_uT) accept = false;
         }
 
         if (accept) {
-          int before = magCal_.buf.n;
-          magCal_.addSample(s.m);
-          int after = magCal_.buf.n;
+          const int before = magCal_.buf.n;
+          magCal_.addSample(m);
+          const int after = magCal_.buf.n;
 
           if (after > before) {
             last_add_ms = now;
-            last_added = s.m;
+            last_added = m;
 
-            vmin = vmin.cwiseMin(s.m);
-            vmax = vmax.cwiseMax(s.m);
+            vmin = vmin.cwiseMin(m);
+            vmax = vmax.cwiseMax(m);
 
-            // stable-ish center from bounds midpoint
             center = 0.5f * (vmin + vmax);
 
-            // unit direction about that center
-            Vector3f c = s.m - center;
-            float cn = c.norm();
+            Vector3f c = m - center;
+            const float cn = c.norm();
             if (cn > 1e-6f) {
-              Vector3f u = c / cn;
+              const Vector3f u = c / cn;
               umin = umin.cwiseMin(u);
               umax = umax.cwiseMax(u);
             }
@@ -679,49 +723,47 @@ private:
         }
       }
 
-      int n = magCal_.buf.n;
+      const int n = magCal_.buf.n;
       if (n != last_n) { last_n = n; last_change = millis(); }
 
-      if (millis() - last_change > ImuCalWizardCfg::STUCK_MS) {
+      if ((uint32_t)(millis() - last_change) > ImuCalWizardCfg::STUCK_MS) {
         Serial.printf("[MAG] stuck n=%d (no accepted samples)\n", n - start_n);
         out_why = "No MAG samples";
         return false;
       }
 
-      uint32_t elapsed = (uint32_t)(millis() - tcap0);
+      const uint32_t elapsed = (uint32_t)(millis() - tcap0);
 
-      // progress components
-      float pS = (float)(n - start_n) / (float)ImuCalWizardCfg::MAG_NEED;
-      float pT = (float)elapsed / (float)ImuCalWizardCfg::MAG_MIN_TIME_MS;
+      // progress
+      const float pS = (float)(n - start_n) / (float)ImuCalWizardCfg::MAG_NEED;
+      const float pT = (float)elapsed / (float)ImuCalWizardCfg::MAG_MIN_TIME_MS;
 
-      Vector3f ur = umax - umin;          // 0..2
+      const Vector3f ur = umax - umin; // 0..2
       float pC = 0.f;
       if (isfinite(ur.x()) && isfinite(ur.y()) && isfinite(ur.z())) {
-        float px = clamp01_(ur.x() / ImuCalWizardCfg::MAG_URANGE_TARGET);
-        float py = clamp01_(ur.y() / ImuCalWizardCfg::MAG_URANGE_TARGET);
-        float pz = clamp01_(ur.z() / ImuCalWizardCfg::MAG_URANGE_TARGET);
-        pC = second_smallest3_(px, py, pz); // progress reflects 2 axes covered
+        const float px = clamp01_(ur.x() / ImuCalWizardCfg::MAG_URANGE_TARGET);
+        const float py = clamp01_(ur.y() / ImuCalWizardCfg::MAG_URANGE_TARGET);
+        const float pz = clamp01_(ur.z() / ImuCalWizardCfg::MAG_URANGE_TARGET);
+        pC = second_smallest3_(px, py, pz);
       }
 
       float p = pS;
       if (pT < p) p = pT;
       if (pC < p) p = pC;
-
       ui_.bar01(p);
 
-      // Only allow finish if we have enough samples, enough time, AND coverage
+      // finish gate
       if (n >= target_n && elapsed >= ImuCalWizardCfg::MAG_MIN_TIME_MS) {
-        Vector3f span = vmax - vmin;
+        const Vector3f span = vmax - vmin;
 
-        // sort spans -> smin, smid, smax
         float a = span.x(), b = span.y(), c = span.z();
         float smin = a, smid = b, smax = c;
         if (smin > smid) { float t=smin; smin=smid; smid=t; }
         if (smid > smax) { float t=smid; smid=smax; smax=t; }
         if (smin > smid) { float t=smin; smin=smid; smid=t; }
 
-        float rmin = (smax > 1e-6f) ? (smin / smax) : 0.f;
-        float rmid = (smax > 1e-6f) ? (smid / smax) : 0.f;
+        const float rmin = (smax > 1e-6f) ? (smin / smax) : 0.f;
+        const float rmid = (smax > 1e-6f) ? (smid / smax) : 0.f;
 
         Serial.printf("[MAG] n=%d elapsed=%.1fs span=(%.3f,%.3f,%.3f) ratios=(%.2f,%.2f) urange=(%.2f,%.2f,%.2f)\n",
                       n - start_n, (double)(elapsed / 1000.0f),
@@ -729,15 +771,12 @@ private:
                       (double)rmin, (double)rmid,
                       (double)ur.x(), (double)ur.y(), (double)ur.z());
 
-        // FINAL GATES HERE
-        // 1) Span ratio gate
         if (rmin < ImuCalWizardCfg::MAG_SPAN_MIN_FRAC ||
             rmid < ImuCalWizardCfg::MAG_SPAN_MID_FRAC) {
           out_why = "Span ratios too low";
           return false;
         }
 
-        // 2) Centered direction range gate: require at least 2 axes to meet target
         int ok_axes = 0;
         ok_axes += (ur.x() >= ImuCalWizardCfg::MAG_URANGE_TARGET) ? 1 : 0;
         ok_axes += (ur.y() >= ImuCalWizardCfg::MAG_URANGE_TARGET) ? 1 : 0;
@@ -747,10 +786,8 @@ private:
           return false;
         }
 
-        // Coverage tests:
         if (smax < 1e-3f) { out_why = "MAG not changing"; return false; }
 
-        // Planarity test: det(C) small => planar motion
         const float detC = unit_dir_cov_det_(magCal_.buf.v, n);
         Serial.printf("[MAG] detC=%.6f\n", (double)detC);
 
@@ -770,11 +807,11 @@ private:
     return false;
   }
 
-  void fillBlob_(ImuCalBlobV1& blob) {
+  void fillBlob_(ImuCalBlobV2& blob) {
     memset(&blob, 0, sizeof(blob));
-    blob.magic = ImuCalBlobV1::IMU_CAL_MAGIC;
-    blob.version = ImuCalBlobV1::IMU_CAL_VERSION;
-    blob.size_bytes = sizeof(ImuCalBlobV1);
+    blob.magic = ImuCalBlobV2::IMU_CAL_MAGIC;
+    blob.version = ImuCalBlobV2::IMU_CAL_VERSION;
+    blob.size_bytes = sizeof(ImuCalBlobV2);
 
     blob.accel_ok = acc_out_.ok ? 1 : 0;
     blob.accel_g  = acc_out_.g;
@@ -800,8 +837,8 @@ private:
   M5Ui& ui_;
   ImuCalStoreNvs& store_;
 
-  // Stored inside wizard => not on stack
 public:
+  // Stored inside wizard => not on stack
   imu_cal::AccelCalibrator<float, 400, 1> accelCal_{};
   imu_cal::GyroCalibrator<float,  400, 8> gyroCal_{};
   imu_cal::MagCalibrator<float,   400>    magCal_{};
