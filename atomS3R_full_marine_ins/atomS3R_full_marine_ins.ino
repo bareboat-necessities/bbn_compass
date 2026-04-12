@@ -718,9 +718,9 @@ private:
     nmea_xdr_pitch_roll(SEA_STATE_NMEA_TALKER, pitch_deg_, roll_deg_);
     nmea_xdr_heave(SEA_STATE_NMEA_TALKER, heave_wave_clean_m_);
     nmea_xdr_heave_envel(SEA_STATE_NMEA_TALKER, wave_envelope_m_);
-    nmea_xdr_freq_accel(SEA_STATE_NMEA_TALKER, wave_accel_hz_);
-    nmea_xdr_wave_angle(SEA_STATE_NMEA_TALKER, wave_angle_deg_);
-    nmea_xdr_wave_dir_sign(SEA_STATE_NMEA_TALKER, (int)wave_dir_sign_);
+    //nmea_xdr_freq_accel(SEA_STATE_NMEA_TALKER, wave_accel_hz_);
+    //nmea_xdr_wave_angle(SEA_STATE_NMEA_TALKER, wave_angle_deg_);
+    //nmea_xdr_wave_dir_sign(SEA_STATE_NMEA_TALKER, (int)wave_dir_sign_);
     nmea_rot(SEA_STATE_NMEA_TALKER, rot_dpm_filt_, valid);
 #else
   #if ARDUINO_PLOTTER
