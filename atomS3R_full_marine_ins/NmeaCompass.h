@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+
 #include <math.h>
 #include "NmeaChecksum.h"
 
@@ -37,10 +38,46 @@ static inline void nmea_rot(const char* talker2, float rot_deg_per_min, bool val
 static inline void nmea_xdr_pitch_roll(const char* talker2, float pitch_deg, float roll_deg) {
   char s[82];
   // Keep it short to stay under 82 chars
-  snprintf(s, sizeof(s), "$%sXDR,A,%.1f,D,PTCH",
-           talker2, (double)pitch_deg);
+  snprintf(s, sizeof(s), "$%sXDR,A,%.1f,D,PTCH", talker2, (double)pitch_deg);
   nmea_send(s);
-  snprintf(s, sizeof(s), "$%sXDR,A,%.1f,D,ROLL",
-           talker2, (double)roll_deg);
+  snprintf(s, sizeof(s), "$%sXDR,A,%.1f,D,ROLL", talker2, (double)roll_deg);
+  nmea_send(s);
+}
+
+// $--XDR,D,x.x,M,HEAVE_1*hh  (heave / vertical displacement, meters)
+static inline void nmea_xdr_heave(const char* talker2, float heave_m) {
+  char s[82];
+  snprintf(s, sizeof(s), "$%sXDR,D,%.4f,M,HEAVE_1", talker2, (double)heave_m);
+  nmea_send(s);
+}
+
+// $--XDR,D,x.x,M,ENVEL_H_1*hh  (heave envelope, meters)
+static inline void nmea_xdr_heave_envel(const char* talker2, float heave_m) {
+  char s[82];
+  snprintf(s, sizeof(s), "$%sXDR,D,%.4f,M,ENVEL_H_1", talker2, (double)heave_m);
+  nmea_send(s);
+}
+
+// $--XDR,F,x.x,H,FREQ_A_1*hh  (dominant wave accel frequency, Hz)
+static inline void nmea_xdr_freq_accel(const char* talker2, float freq_hz) {
+  char s[82];
+  snprintf(s, sizeof(s), "$%sXDR,F,%.4f,H,FREQ_A_1", talker2, (double)freq_hz);
+  nmea_send(s);
+}
+
+// $--XDR,A,x.x,D,WAVE_ANG_1*hh
+static inline void nmea_xdr_wave_angle(const char* talker2, float wave_angle_deg) {
+  char s[82];
+  // Keep it short to stay under 82 chars
+  snprintf(s, sizeof(s), "$%sXDR,A,%.1f,D,WAVE_ANG_1", talker2, (double)wave_angle_deg);
+  nmea_send(s);
+}
+
+
+// $--XDR,G,x.x,,WAVE_DSIGN_1*hh
+static inline void nmea_xdr_wave_dir_sign(const char* talker2, int wave_dir_sign) {
+  char s[82];
+  // Keep it short to stay under 82 chars
+  snprintf(s, sizeof(s), "$%sXDR,G,%d,,WAVE_DSIGN_1", talker2, wave_dir_sign);
   nmea_send(s);
 }

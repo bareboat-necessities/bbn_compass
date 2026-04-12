@@ -13,7 +13,7 @@
   #define SEA_STATE_ENABLE_WIZARD 1
 #endif
 
-#define ARDUINO_PLOTTER 1
+#define ARDUINO_PLOTTER 0
 
 #include <M5Unified.h>
 #include <cmath>
@@ -38,7 +38,7 @@
 #endif
 
 #ifndef SEA_STATE_SERIAL_NMEA
-  #define SEA_STATE_SERIAL_NMEA 0
+  #define SEA_STATE_SERIAL_NMEA 1
 #endif
 
 #ifndef SEA_STATE_NMEA_TALKER
@@ -280,12 +280,15 @@ private:
   bool  heading_valid_    = false;
   float heave_m_          = 0.0f;
   float wave_envelope_m_  = 0.0f;
-  float wave_hz_          = FREQ_GUESS;
+  float wave_accel_hz_          = FREQ_GUESS;
 
   float heave_raw_m_        = 0.0f;
   float heave_baseline_m_   = 0.0f;
   float heave_wave_raw_m_   = 0.0f;
   float heave_wave_clean_m_ = 0.0f;
+
+  float wave_angle_deg_     = 0.0f;
+  WaveDirection wave_dir_sign_ = WaveDirection::UNCERTAIN;
 
   bool  mag_ok_          = false;
   bool  mag_fresh_       = false;
@@ -490,6 +493,9 @@ private:
     heave_baseline_m_    = 0.0f;
     heave_wave_raw_m_    = 0.0f;
     heave_wave_clean_m_  = 0.0f;
+
+    wave_angle_deg_      = 0.0f;
+    wave_dir_sign_       = WaveDirection::UNCERTAIN;
   }
 
 #if SEA_STATE_ENABLE_WIZARD
@@ -623,12 +629,15 @@ private:
 
     heave_m_         = displacement_raw_up_m.z();
     wave_envelope_m_ = fusion_.raw().getDisplacementScale();
-    wave_hz_         = fusion_.raw().getFreqHz();
+    wave_accel_hz_   = fusion_.raw().getFreqHz();
 
     heave_raw_m_        = heave_m_;
     heave_baseline_m_   = displacement_det_out.baseline_slow.z();
     heave_wave_raw_m_   = displacement_det_out.wave_raw.z();
     heave_wave_clean_m_ = displacement_det_out.wave_clean.z();
+
+    wave_angle_deg_  = fusion_.waveDirectionDeg();
+    wave_dir_sign_   = fusion_.raw().getDirSignState();
   }
 
   void drawHomeStatic_() {
@@ -680,18 +689,14 @@ private:
       M5.Display.printf("HDG:   --- WAIT\n");
     }
 
-    M5.Display.printf("HDM: %6.1f %s\n",
-                      static_cast<double>(heading_mag_deg_),
-                      heading_mag_ok_ ? "MAG" : "---");
+    M5.Display.printf("HDM: %6.1f %s\n", static_cast<double>(heading_mag_deg_), heading_mag_ok_ ? "MAG" : "---");
     M5.Display.printf("ROL: %6.1f deg\n", static_cast<double>(roll_deg_));
     M5.Display.printf("PIT: %6.1f deg\n", static_cast<double>(pitch_deg_));
     M5.Display.printf("HEV: %6.3f m\n", static_cast<double>(heave_m_));
-    M5.Display.printf("FRQ: %6.3f Hz\n", static_cast<double>(wave_hz_));
+    M5.Display.printf("FRQ: %6.3f Hz\n", static_cast<double>(wave_accel_hz_));
     M5.Display.printf("MAG: %s %s\n", mag_ok_ ? "OK " : "BAD", mag_fresh_ ? "NEW" : "OLD");
     M5.Display.printf("|m|: %6.1f uT\n", static_cast<double>(mag_norm_uT_));
-    M5.Display.printf("|aR|:%5.2f |aC|:%5.2f\n",
-                      static_cast<double>(a_raw_norm_),
-                      static_cast<double>(a_cal_.norm()));
+    M5.Display.printf("|aR|:%5.2f |aC|:%5.2f\n", static_cast<double>(a_raw_norm_), static_cast<double>(a_cal_.norm()));
     ui_.line("");
   }
 
@@ -712,7 +717,10 @@ private:
     }
     nmea_xdr_pitch_roll(SEA_STATE_NMEA_TALKER, pitch_deg_, roll_deg_);
     nmea_xdr_heave(SEA_STATE_NMEA_TALKER, heave_wave_clean_m_);
-    nmea_xdr_freq(SEA_STATE_NMEA_TALKER, wave_hz_);
+    nmea_xdr_heave_envel(SEA_STATE_NMEA_TALKER, wave_envelope_m_);
+    nmea_xdr_freq_accel(SEA_STATE_NMEA_TALKER, wave_accel_hz_);
+    nmea_xdr_wave_angle(SEA_STATE_NMEA_TALKER, wave_angle_deg_);
+    nmea_xdr_wave_dir_sign(SEA_STATE_NMEA_TALKER, (int)wave_dir_sign_);
     nmea_rot(SEA_STATE_NMEA_TALKER, rot_dpm_filt_, valid);
 #else
   #if ARDUINO_PLOTTER
