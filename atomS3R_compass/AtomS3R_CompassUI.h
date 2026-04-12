@@ -156,7 +156,7 @@ class CompassUI {
     char buf[16];
     int hdg = (int)lroundf(headingDeg);
     snprintf(buf, sizeof(buf), "%d", hdg);
-    
+
     _frame.setTextColor(TFT_WHITE, TFT_BLACK);
     _frame.setTextSize(2);
 
@@ -179,11 +179,11 @@ class CompassUI {
       _frame.setCursor(2, _h - 14);
       _frame.setTextColor(magOk ? TFT_GREEN : TFT_ORANGE, TFT_BLACK);
       _frame.print(magOk ? "MAG OK" : "MAG ?");
-  
+
       _frame.setTextColor(tiltWarn ? TFT_ORANGE : TFT_DARKGREY, TFT_BLACK);
       _frame.setCursor(_w - 40, _h - 14);
       _frame.print(tiltWarn ? "TILT" : "    ");
-  
+
       if (std::isfinite(mag_uT)) {
         _frame.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
         _frame.setCursor(_w/2 - 18, _h - 14);
@@ -236,7 +236,8 @@ void loop() {
   M5.update();
 
   if (M5.Imu.update()) {
-    // getImuData includes accel/gyro/mag  [oai_citation:5‡m5stack.oss-cn-shenzhen.aliyuncs.com](https://m5stack.oss-cn-shenzhen.aliyuncs.com/resource/docs/static/pdf/static/en/arduino/m5unified/imu_class.pdf)
+    // getImuData includes accel/gyro/mag
+    // [oai_citation:5‡m5stack.oss-cn-shenzhen.aliyuncs.com](https://m5stack.oss-cn-shenzhen.aliyuncs.com/resource/docs/static/pdf/static/en/arduino/m5unified/imu_class.pdf)
     auto d = M5.Imu.getImuData();
 
     // Very basic “flat” heading (no tilt compensation):

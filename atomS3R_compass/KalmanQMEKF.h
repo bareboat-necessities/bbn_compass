@@ -6,15 +6,15 @@
 
   q-mekf
 
-  C++ implementation of the Quaternion Multiplicative Extended Kalman Filter (Q-MEKF), with support 
+  C++ implementation of the Quaternion Multiplicative Extended Kalman Filter (Q-MEKF), with support
   for accelerometer and magnetometer measurements.
 
   Based on the following papers:
 
-    Lefferts, Ern J., F. Landis Markley, and Malcolm D. Shuster. "Kalman filtering for spacecraft attitude estimation." 
+    Lefferts, Ern J., F. Landis Markley, and Malcolm D. Shuster. "Kalman filtering for spacecraft attitude estimation."
     Journal of Guidance, control, and Dynamics 5.5 (1982): 417-429.
-    
-    Markley, F. Landis. "Attitude error representations for Kalman filtering." 
+
+    Markley, F. Landis. "Attitude error representations for Kalman filtering."
     Journal of guidance, control, and dynamics 26.2 (2003): 311-317.
 
 
@@ -154,7 +154,7 @@ void QuaternionMEKF<T, with_bias>::initialize_from_acc_mag(Vector3 const& acc, V
   qref = Eigen::Quaternion<T>(R.transpose());
 
   // world-frame mag ref
-  v2ref = qref * mag;        
+  v2ref = qref * mag;
 }
 
 template<typename T, bool with_bias>
@@ -277,7 +277,7 @@ void QuaternionMEKF<T, with_bias>::measurement_update(Vector3 const& acc, Vector
     // Joseph form of covariance measurement update
     MatrixN const temp = MatrixN::Identity() - K * C;
     P = temp * P * temp.transpose() + K * R * K.transpose();
-    
+
     // Apply quaternion correction
     applyQuaternionCorrectionFromErrorState();
 

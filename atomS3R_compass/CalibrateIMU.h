@@ -308,6 +308,8 @@ static inline Eigen::Matrix<T,3,3> diag_only_from(const Eigen::Matrix<T,3,3>& M)
 // Fixed-capacity sample buffer
 template <typename T, int N>
 struct SampleBuffer3 {
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
   static_assert(N > 0, "N must be positive");
   static_assert(N <= IMU_CAL_MAX_SAMPLES, "N exceeds IMU_CAL_MAX_SAMPLES (400)");
 
@@ -332,6 +334,8 @@ struct SampleBuffer3 {
 // Ellipsoid -> sphere robust fit
 template <typename T>
 struct EllipsoidSphereFit {
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
   bool ok = false;
   FitFail reason = FitFail::BAD_ARG;
 
@@ -596,6 +600,8 @@ static EllipsoidSphereFit<T> ellipsoid_to_sphere_robust(
 // Temperature model: bias(T) = b0 + k*(T - T0)
 template <typename T>
 struct TempBias3 {
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
   bool ok = false;
   T T0 = T(25);
   Eigen::Matrix<T,3,1> b0 = Eigen::Matrix<T,3,1>::Zero();
@@ -633,6 +639,8 @@ static TempBias3<T> fit_temp_bias3(const Eigen::Matrix<T,3,1>(&b)[N], const T(&t
 // Calibration outputs
 template <typename T>
 struct AccelCalibration {
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
   bool ok = false;
   T g = T(9.80665);
   Eigen::Matrix<T,3,3> S = Eigen::Matrix<T,3,3>::Identity(); // a_cal = S*(a_raw - bias(T))
@@ -646,6 +654,8 @@ struct AccelCalibration {
 
 template <typename T>
 struct MagCalibration {
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
   bool ok = false;
   Eigen::Matrix<T,3,3> A = Eigen::Matrix<T,3,3>::Identity(); // m_cal = A*(m_raw - b)
   Eigen::Matrix<T,3,1> b = Eigen::Matrix<T,3,1>::Zero();
@@ -659,6 +669,8 @@ struct MagCalibration {
 
 template <typename T>
 struct GyroCalibration {
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
   bool ok = false;
   Eigen::Matrix<T,3,3> S = Eigen::Matrix<T,3,3>::Identity(); // keep identity unless you have a known-rate rig
   TempBias3<T> biasT;
@@ -782,6 +794,8 @@ static inline bool post_scale_accel_S_to_match_g_(
 // Calibrator: Accel
 template <typename T, int N, int K_TBINS = 8>
 struct AccelCalibrator {
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
   static_assert(N <= IMU_CAL_MAX_SAMPLES, "N exceeds IMU_CAL_MAX_SAMPLES (400)");
   static_assert(K_TBINS > 0 && K_TBINS <= 16, "K_TBINS unreasonable");
 
@@ -799,7 +813,7 @@ struct AccelCalibrator {
   enum class AccelSMode : uint8_t { PolarSPD = 0, DiagonalOnly = 1 };
 
   // Recommended default for compass/attitude: DiagonalOnly
-  AccelSMode accel_S_mode = AccelSMode::DiagonalOnly;  // AccelSMode::PolarSPD; 
+  AccelSMode accel_S_mode = AccelSMode::DiagonalOnly;  // AccelSMode::PolarSPD;
 
   // Plausibility gates (dimensionless)
   T accel_diag_lo = T(0.80);
@@ -1003,13 +1017,13 @@ struct AccelCalibrator {
                                                     T(0.90),  T(1.10),
                                                     T(0.90),  T(1.10));
     }
-    
+
     if (!did_scale) {
       last_fail_ = FitFail::ACCEL_S_UNPHYSICAL;
       if (reason_out) *reason_out = last_fail_;
       return false;
     }
-    
+
     last_fail_ = FitFail::OK;
     if (reason_out) *reason_out = FitFail::OK;
     return true;
@@ -1019,6 +1033,8 @@ struct AccelCalibrator {
 // Calibrator: Magnetometer
 template <typename T, int N>
 struct MagCalibrator {
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
   static_assert(N <= IMU_CAL_MAX_SAMPLES, "N exceeds IMU_CAL_MAX_SAMPLES (400)");
   using Vec3 = Eigen::Matrix<T,3,1>;
   SampleBuffer3<T, N> buf;
@@ -1121,6 +1137,8 @@ struct MagCalibrator {
 // Calibrator: Gyroscope bias(T)
 template <typename T, int N, int K_TBINS = 8>
 struct GyroCalibrator {
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
   static_assert(N <= IMU_CAL_MAX_SAMPLES, "N exceeds IMU_CAL_MAX_SAMPLES (400)");
   static_assert(K_TBINS > 0 && K_TBINS <= 16, "K_TBINS unreasonable");
 
