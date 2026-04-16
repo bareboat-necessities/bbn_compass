@@ -666,8 +666,6 @@ class Kalman3D_Wave_OU_II {
     //   - quaternion() returns BODY' -> WORLD via qref.conjugate().
     //   - A world-frame reference vector v_world is predicted in BODY' as:
     //         v_bodyprime = R_wb() * v_world
-    //   - Attitude error is injected right-multiplicatively in BODY' coordinates:
-    //         qref <- qref * dq(delta_theta_bodyprime)
     //
     // Important:
     //   v2ref is stored in WORLD coordinates (see initialize_from_acc_mag():
@@ -760,7 +758,15 @@ class Kalman3D_Wave_OU_II {
 
     // Closed-form helpers for rotation & integrals (constant ω over [0, t])
 
-    // Rodrigues rotation and the integral B(t) = -∫_0^t exp(-[ω]× τ) dτ
+    // Rodrigues rotation and the integral
+    //   B(t) = ∫_0^t exp(-[ω]× τ) dτ
+    //
+    // For this filter's left-multiplicative WORLD->BODY' attitude-error convention:
+    //
+    //   δθ̇ = -[ω]× δθ + δb_g + ...
+    //
+    // so the exact discrete cross-term is positive:
+    //   Φ_{θb}(t) = +B(t)
     EIGEN_STRONG_INLINE void rot_and_B_from_wt_(const Vector3& w, T t, Matrix3& R, Matrix3& B) const {
         const T wnorm = w.norm();
         const Matrix3 W = skew_symmetric_matrix(w);
@@ -875,6 +881,7 @@ class Kalman3D_Wave_OU_II {
 
     // Inject the current local attitude-error state into qref, then clear the attitude-error slot in xext.
     void applyQuaternionCorrectionFromErrorState();
+    void apply_error_state_reset_jacobian_(const Vector3& dtheta_injected);
 
     static void PhiAxis3x1_analytic(T tau, T h, Eigen::Matrix<T,3,3>& Phi_axis);
     static void QdAxis3x1_analytic(T tau, T h, T sigma2, Eigen::Matrix<T,3,3>& Qd_axis);
@@ -1362,6 +1369,9 @@ void Kalman3D_Wave_OU_II<T, with_gyro_bias, with_accel_bias>::initialize_from_ac
 {
     const Vector3 acc = deheel_vector_(acc_body);
     const Vector3 mag = deheel_vector_(mag_body);
+    if (!acc.allFinite() || !mag.allFinite()) {
+        throw std::runtime_error("Invalid accel/mag vector: non-finite value in initialization");
+    }
 
     const T anorm = acc.norm();
     if (anorm < T(1e-8)) {
@@ -1504,6 +1514,12 @@ void Kalman3D_Wave_OU_II<T, with_gyro_bias, with_accel_bias>::initialize_from_ac
     Vector3 const& acc_body)
 {
     const Eigen::Quaternion<T> q_old_bw = quaternion_boat();
+    if (!std::isfinite(q_old_bw.x()) || !std::isfinite(q_old_bw.y()) ||
+        !std::isfinite(q_old_bw.z()) || !std::isfinite(q_old_bw.w()))
+    {
+        initialize_from_acc(acc_body);
+        return;
+    }
 
     const T ox = q_old_bw.x();
     const T oy = q_old_bw.y();
@@ -1558,20 +1574,43 @@ void Kalman3D_Wave_OU_II<T, with_gyro_bias, with_accel_bias>::initialize_from_tr
 
     // Bias states = 0
     if constexpr (with_gyro_bias) {
-        xext.template segment<3>(3).setZero();       // gyro bias block
+        xext.template segment<3>(3).setZero();
     }
     if constexpr (with_accel_bias) {
-        xext.template segment<3>(OFF_BA).setZero();  // accel bias block
+        xext.template segment<3>(OFF_BA).setZero();
     }
 
-    // q_bw is BODY→WORLD (NED). Internally we store WORLD→BODY'.
-    qref = q_bw.conjugate();
-    qref.normalize();
+    // Input q_bw is the PHYSICAL boat/body attitude B->W.
+    // Internally we store qref = W->B', where B' is the virtual un-heeled body frame.
+    Eigen::Quaternion<T> q_in = q_bw;
+    const T nq = q_in.norm();
+    if (!(nq > T(1e-8))) {
+        qref.setIdentity();
+    } else {
+        q_in.normalize();
+
+        const T half = -wind_heel_rad_ * T(0.5);
+        const T c = std::cos(half);
+        const T s = std::sin(half);
+
+        const Eigen::Quaternion<T> q_BprimeB(c, s, 0, 0);           // B -> B'
+        const Eigen::Quaternion<T> q_BBprime = q_BprimeB.conjugate(); // B' -> B
+
+        const Eigen::Quaternion<T> q_WBprime = q_in * q_BBprime; // B' -> W
+        qref = q_WBprime.conjugate();                            // W -> B'
+        qref.normalize();
+    }
 
     // Reset covariance
     Pext.setZero();
     const T p_0 = T(1e-5);
     Pext.diagonal().array() = p_0;
+
+    // Reset cached angular kinematics used by lever-arm logic
+    last_gyr_bias_corrected.setZero();
+    prev_omega_b_.setZero();
+    alpha_b_.setZero();
+    have_prev_omega_ = false;
 }
 
 template<typename T, bool with_gyro_bias, bool with_accel_bias>
@@ -1642,7 +1681,10 @@ void Kalman3D_Wave_OU_II<T, with_gyro_bias, with_accel_bias>::time_update(
         // exact discrete attitude error transition
         F_AA.template topLeftCorner<3,3>() = Rstep;
 
-        // exact cross-term instead of -I*Ts
+        // exact cross-term
+        //   Φ_{θb} = +∫_0^Ts exp(-[ω]× s) ds
+        // small-angle limit:
+        //   +I*Ts - 1/2 [ω]× Ts² + ...
         F_AA.template block<3,3>(0,3) = Bstep;
     }
 
@@ -2146,6 +2188,7 @@ void Kalman3D_Wave_OU_II<T, with_gyro_bias, with_accel_bias>::measurement_update
         return;
     }
     last_mag_diag_.S = S_mat;
+    last_mag_diag_.nis = nis3_from_ldlt_(ldlt, r);
 
     MatrixNX3& K = K_scratch_;
     K.noalias() = PCt * ldlt.solve(Matrix3::Identity());
@@ -2207,10 +2250,57 @@ Matrix<T, 3, 3> Kalman3D_Wave_OU_II<T, with_gyro_bias, with_accel_bias>::skew_sy
 }
 
 template<typename T, bool with_gyro_bias, bool with_accel_bias>
+void Kalman3D_Wave_OU_II<T, with_gyro_bias, with_accel_bias>::apply_error_state_reset_jacobian_(
+    const Vector3& dtheta_injected)
+{
+    if (!dtheta_injected.allFinite()) return;
+
+    const T n2 = dtheta_injected.squaredNorm();
+    if (!(n2 > T(0))) return;
+
+    // Left-multiplicative reset:
+    //
+    //   q_new = Exp(dtheta_hat) * q_old
+    //
+    // If the pre-reset attitude error is δθ, then after injection the new local
+    // attitude error is, to first order:
+    //
+    //   δθ_new ≈ (I + 1/2 [dtheta_hat]×) (δθ - dtheta_hat)
+    //
+    // So the covariance reset Jacobian is:
+    //
+    //   G = I + 1/2 [dtheta_hat]×
+    //
+    const Matrix3 G =
+        Matrix3::Identity() + T(0.5) * skew_symmetric_matrix(dtheta_injected);
+
+    // Structured similarity update for Tm = diag(G, I):
+    //   Paa' = G * Paa * Gᵀ
+    //   Pax' = G * Pax
+    //   Pxa' = Pax'ᵀ  (enforce symmetry)
+    //   Pxx' = Pxx    (unchanged)
+    const Matrix3 Paa_old = Pext.template block<3,3>(0, 0);
+    const Matrix<T, 3, NX - 3> Pax_old = Pext.template block<3, NX - 3>(0, 3);
+
+    Pext.template block<3,3>(0, 0).noalias() = G * Paa_old * G.transpose();
+    Pext.template block<3, NX - 3>(0, 3).noalias() = G * Pax_old;
+    Pext.template block<NX - 3, 3>(3, 0) = Pext.template block<3, NX - 3>(0, 3).transpose();
+
+    // Keep covariance exactly symmetric against floating-point noise.
+    Pext = T(0.5) * (Pext + Pext.transpose());
+}
+
+template<typename T, bool with_gyro_bias, bool with_accel_bias>
 void Kalman3D_Wave_OU_II<T, with_gyro_bias, with_accel_bias>::applyQuaternionCorrectionFromErrorState()
 {
-    const Eigen::Quaternion<T> corr =
-        quat_from_delta_theta((xext.template segment<3>(0)).eval());
+    const Vector3 dtheta = xext.template segment<3>(0);
+
+    if (!dtheta.allFinite()) {
+        xext.template head<3>().setZero();
+        return;
+    }
+
+    const Eigen::Quaternion<T> corr = quat_from_delta_theta(dtheta);
 
     // qref stores WORLD->BODY'.
     // Measurement Jacobians use the left-multiplicative convention:
@@ -2218,6 +2308,11 @@ void Kalman3D_Wave_OU_II<T, with_gyro_bias, with_accel_bias>::applyQuaternionCor
     // so the correction must be injected on the LEFT.
     qref = corr * qref;
     qref.normalize();
+
+    // Reset covariance consistently with the quaternion injection
+    // before clearing the local attitude-error state.
+    apply_error_state_reset_jacobian_(dtheta);
+
     // Clear the local attitude-error state after injection.
     xext.template head<3>().setZero();
 }
