@@ -30,7 +30,9 @@ static constexpr float ROT_BIAS_TAU_S = 20.0f;
 static constexpr float ROT_STILL_G_TOL_FRAC = 0.12f;
 static constexpr float ROT_STILL_GYRO_RAD_S = 0.15f;
 
-static inline float clampf_(float x, float lo, float hi) { return x < lo ? lo : (x > hi ? hi : x); }
+static inline float clampf_(float x, float lo, float hi) {
+  return x < lo ? lo : (x > hi ? hi : x);
+}
 
 static inline float wrap360_(float deg) {
   while (deg < 0.0f) deg += 360.0f;
@@ -75,11 +77,14 @@ struct AttitudeSolution {
   float pitch_deg = 0.0f;
   float yaw_deg = 0.0f;
   float heading_deg = 0.0f;
+
 };
 
 struct CompassOutputs {
   AttitudeSolution att;
   float rot_dpm = 0.0f;
+  float declination = -999999.0;
+
 };
 
 static inline AttitudeSolution makeAttitudeFromQuat(float x, float y, float z, float w) {
@@ -144,8 +149,9 @@ struct MagGateConfig {
 };
 
 class MagGate {
- public:
-  explicit MagGate(const MagGateConfig& cfg) : cfg_(cfg) {}
+public:
+  explicit MagGate(const MagGateConfig& cfg)
+    : cfg_(cfg) {}
 
   void reset() {
     last_mag_.setZero();
@@ -189,11 +195,10 @@ class MagGate {
   }
 
   bool looksStuck() const {
-    return (cfg_.stuck_reject_after_n != 0) &&
-           (repeat_count_ >= cfg_.stuck_reject_after_n);
+    return (cfg_.stuck_reject_after_n != 0) && (repeat_count_ >= cfg_.stuck_reject_after_n);
   }
 
- private:
+private:
   MagGateConfig cfg_{};
   Vector3f last_mag_ = Vector3f::Zero();
   uint32_t last_ms_ = 0;
@@ -201,7 +206,7 @@ class MagGate {
 };
 
 class RotEstimator {
- public:
+public:
   void reset() {
     inited_ = false;
     filt_dpm_ = 0.0f;
@@ -244,7 +249,7 @@ class RotEstimator {
     return filt_dpm_;
   }
 
- private:
+private:
   bool inited_ = false;
   float filt_dpm_ = 0.0f;
   bool gyro_bias_ok_ = false;
@@ -252,7 +257,7 @@ class RotEstimator {
 };
 
 class IAttitudeBackend {
- public:
+public:
   virtual ~IAttitudeBackend() = default;
   virtual void reset() = 0;
   virtual void step(const CalibratedSample& s, AttitudeSolution& out) = 0;
@@ -260,10 +265,9 @@ class IAttitudeBackend {
 };
 
 class CompassAppBase {
- public:
+public:
   CompassAppBase(std::unique_ptr<IAttitudeBackend> backend, MagGateConfig mag_cfg, const char* boot_name)
-      : backend_(std::move(backend))
-      , wizard_(ui_, store_),
+    : backend_(std::move(backend)), wizard_(ui_, store_),
       mag_gate_(mag_cfg), boot_name_(boot_name) {}
 
   void begin() {
@@ -318,29 +322,19 @@ class CompassAppBase {
     drawHomeStatic_();
 
     start_us_ = micros();
-    next_tick_us_ = micros();
+    last_tick_us_ = micros();
     last_update_us_ = 0;
   }
 
   void tick() {
-    // Wait until next scheduled tick.
-    while (true) {
     const uint32_t now_us = micros();
-    const int32_t wait_us = (int32_t)(next_tick_us_ - now_us);
-    if (wait_us <= 0) break;
-
-    if (wait_us > 1000)
-      delayMicroseconds(500);
-    else
-      delayMicroseconds((uint32_t)wait_us);
+    if (now_us - last_tick_us_ < LOOP_PERIOD_US) {
+      return;  // defer to other processes
     }
-
     // Advance schedule. If we fell far behind, resync cleanly.
-    const uint32_t now_us2 = micros();
-    if ((int32_t)(now_us2 - next_tick_us_) > (int32_t)(4 * LOOP_PERIOD_US))
-    next_tick_us_ = now_us2 + LOOP_PERIOD_US;
-    else
-    next_tick_us_ += LOOP_PERIOD_US;
+    while (now_us - last_tick_us_ > LOOP_PERIOD_US) {
+      last_tick_us_ += LOOP_PERIOD_US;
+    }
 
     Input::update();
 
@@ -371,7 +365,14 @@ class CompassAppBase {
     streamSerial_();
   }
 
- protected:
+  void set_declination(float dec){
+    outputs_.declination = dec;
+  }
+  float get_declination(){
+    return outputs_.declination;
+  }
+
+protected:
   void reloadBlobAndRuntime_() {
     have_blob_ = store_.load(blob_);
     if (!have_blob_) memset(&blob_, 0, sizeof(blob_));
@@ -421,31 +422,31 @@ class CompassAppBase {
     last_update_us_ = 0;
   }
 
-CalibratedSample makeCalibratedSample_(const ImuSample& s) {
-  CalibratedSample out{};
-  out.a_raw_norm = s.a.norm();
+  CalibratedSample makeCalibratedSample_(const ImuSample& s) {
+    CalibratedSample out{};
+    out.a_raw_norm = s.a.norm();
 
-  out.a_cal = runtime_.applyAccel(s.a, s.tempC);
-  out.w_cal = runtime_.applyGyro(s.w, s.tempC);
-  out.m_cal = runtime_.applyMag(s.m);
+    out.a_cal = runtime_.applyAccel(s.a, s.tempC);
+    out.w_cal = runtime_.applyGyro(s.w, s.tempC);
+    out.m_cal = runtime_.applyMag(s.m);
 
-  if (last_update_us_ == 0) {
-    out.dt = 1.0f / LOOP_HZ;
-  } else {
-    out.dt = (s.sample_us - last_update_us_) * 1e-6f;
+    if (last_update_us_ == 0) {
+      out.dt = 1.0f / LOOP_HZ;
+    } else {
+      out.dt = (s.sample_us - last_update_us_) * 1e-6f;
+    }
+    last_update_us_ = s.sample_us;
+    out.dt = clampf_(out.dt, 0.0010f, 0.0200f);
+
+    out.mag_norm_uT = out.m_cal.norm();
+    out.mag_ok = (out.mag_norm_uT > 5.0f && out.mag_norm_uT < 200.0f);
+
+    if (out.mag_ok && out.mag_norm_uT > 1e-6f) out.m_unit = out.m_cal / out.mag_norm_uT;
+
+    out.mag_fresh = mag_gate_.update(out.m_cal, out.mag_ok, millis());
+
+    return out;
   }
-  last_update_us_ = s.sample_us;
-  out.dt = clampf_(out.dt, 0.0010f, 0.0200f);
-
-  out.mag_norm_uT = out.m_cal.norm();
-  out.mag_ok = (out.mag_norm_uT > 5.0f && out.mag_norm_uT < 200.0f);
-
-  if (out.mag_ok && out.mag_norm_uT > 1e-6f) out.m_unit = out.m_cal / out.mag_norm_uT;
-
-  out.mag_fresh = mag_gate_.update(out.m_cal, out.mag_ok, millis());
-
-  return out;
-}
 
   void updateOutputs_(const ImuSample& s) {
     sample_ = makeCalibratedSample_(s);
@@ -518,6 +519,10 @@ CalibratedSample makeCalibratedSample_(const ImuSample& s) {
 
 #if COMPASS_SERIAL_NMEA
     nmea_hdm(COMPASS_NMEA_TALKER, outputs_.att.heading_deg);
+    if (outputs_.declination > -360.0  && outputs_.declination < 360.0 ){
+      // TVMDC AW, but this is CVMVT AE
+    nmea_hdt(COMPASS_NMEA_TALKER, wrap360_(outputs_.att.heading_deg+outputs_.declination));
+    }
     nmea_xdr_pitch_roll(COMPASS_NMEA_TALKER, outputs_.att.pitch_deg, outputs_.att.roll_deg);
     nmea_rot(COMPASS_NMEA_TALKER, outputs_.rot_dpm, backend_->isValid());
 #else
@@ -533,7 +538,7 @@ CalibratedSample makeCalibratedSample_(const ImuSample& s) {
 #endif
   }
 
- protected:
+protected:
   M5Ui ui_{};
   ImuCalStoreNvs store_{};
   ImuCalWizard wizard_;
@@ -553,7 +558,7 @@ CalibratedSample makeCalibratedSample_(const ImuSample& s) {
   int tap_count_ = 0;
   uint32_t tap_deadline_ms_ = 0;
   uint32_t start_us_ = 0;
-  uint32_t next_tick_us_ = 0;
+  uint32_t last_tick_us_ = 0;
   uint32_t last_update_us_ = 0;
   uint32_t last_ui_ms_ = 0;
   uint32_t last_serial_ms_ = 0;
