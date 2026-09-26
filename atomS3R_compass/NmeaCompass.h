@@ -24,6 +24,14 @@ static inline void nmea_hdm(const char* talker2, float heading_deg) {
   nmea_send(s);
 }
 
+// $--HDT,xxx.x,T*hh  (true heading)
+static inline void nmea_hdt(const char* talker2, float heading_deg) {
+  char s[82];
+  heading_deg = wrap360f_(heading_deg);
+  snprintf(s, sizeof(s), "$%sHDT,%.1f,M", talker2, (double)heading_deg);
+  nmea_send(s);
+}
+
 // $--ROT,x.x,A*hh  (rate of turn, degrees per minute; A=valid, V=invalid)
 static inline void nmea_rot(const char* talker2, float rot_deg_per_min, bool valid) {
   char s[82];

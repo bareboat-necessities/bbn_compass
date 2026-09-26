@@ -6,6 +6,13 @@
 
 #include <Arduino.h>
 #include <M5Unified.h>
+#include "MultipleSatellite.h"  // TinyGPS for AtomS3R
+
+// Config for communicating with GPS V2 base:
+static const int RXPin = 5, TXPin = 6;  // 6;
+static const uint32_t GPSBaud = 115200;
+const size_t SERIAL_SIZE_RX = 1024;
+MultipleSatellite gps(Serial2, GPSBaud, SERIAL_8N1, RXPin, TXPin);
 
 // 1 = graphical compass by default, 0 = text UI by default
 #ifndef COMPASS_UI_DEFAULT_GRAPHICS
@@ -28,13 +35,16 @@
 using namespace atoms3r_compass;
 
 class QmekfBackend : public IAttitudeBackend {
- public:
+public:
   void reset() override {
     const float g = ImuCalCfg::g_std;
 
-    Vector3f sigma_a; sigma_a <<  0.06f * g,  0.06f * g,   0.06f * g;
-    Vector3f sigma_g; sigma_g <<    0.0030f,    0.0030f,     0.0030f;
-    Vector3f sigma_m; sigma_m <<     0.020f,     0.020f,      0.020f;
+    Vector3f sigma_a;
+    sigma_a << 0.06f * g, 0.06f * g, 0.06f * g;
+    Vector3f sigma_g;
+    sigma_g << 0.0030f, 0.0030f, 0.0030f;
+    Vector3f sigma_m;
+    sigma_m << 0.020f, 0.020f, 0.020f;
 
     if (mekf_) {
       mekf_->~QuaternionMEKF<float, true>();
@@ -72,20 +82,62 @@ class QmekfBackend : public IAttitudeBackend {
     out = makeAttitudeFromQuat(q(0), q(1), q(2), q(3));
   }
 
-  bool isValid() const override { return inited_; }
+  bool isValid() const override {
+    return inited_;
+  }
 
- private:
+private:
   alignas(QuaternionMEKF<float, true>) uint8_t storage_[sizeof(QuaternionMEKF<float, true>)];
   QuaternionMEKF<float, true>* mekf_ = nullptr;
   bool inited_ = false;
 };
 
 class QmekfCompassApp : public CompassAppBase {
- public:
-  QmekfCompassApp() : CompassAppBase(std::make_unique<QmekfBackend>(), MagGateConfig{35, 0.001f, 20}, "QMEKF") {}
+public:
+  QmekfCompassApp()
+    : CompassAppBase(std::make_unique<QmekfBackend>(), MagGateConfig{ 35, 0.001f, 20 }, "QMEKF") {}
 };
 
 static QmekfCompassApp g_app;
 
-void setup() { g_app.begin(); }
-void loop() { g_app.tick(); }
+void gpsEchoLines() {
+  // Line buffer from the GPS and echo it
+  const size_t GpsBuffSize = 128;
+  static char fromGpsBuffer[GpsBuffSize];
+  static char toGpsBuffer[GpsBuffSize];
+  static size_t gps_from_current_size = 0;
+  static size_t gps_to_current_size = 0;
+  while (gps.available()) {  // Buffer messages from GPS
+    int ch = gps.read();     // read GPS information
+    fromGpsBuffer[gps_from_current_size++] = ch;
+    if ('\n' == ch || gps_from_current_size > GpsBuffSize - 2) {
+      Serial.print(fromGpsBuffer);
+      while (gps_from_current_size) {
+        fromGpsBuffer[gps_from_current_size--] = '\0';
+      }
+    }
+  }
+  while (Serial.available()) {  // buffer messages to GPS
+    int ch = Serial.read();     // read GPS information
+    toGpsBuffer[gps_to_current_size++] = ch;
+    if ('\n' == ch || gps_to_current_size > GpsBuffSize - 2) {
+      gps.write(toGpsBuffer);
+      while (gps_to_current_size) {
+        toGpsBuffer[gps_to_current_size--] = '\0';
+      }
+    }
+  }
+}
+
+void setup() {
+  g_app.begin();
+  g_app.set_declination(-10.8);
+  gps.begin();
+  //
+  //gps.setRxBufferSize(SERIAL_SIZE_RX);
+  Serial.setRxBufferSize(SERIAL_SIZE_RX);
+}
+void loop() {
+  g_app.tick();
+  gpsEchoLines();  // handle gps communication
+}
