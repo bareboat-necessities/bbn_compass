@@ -6,13 +6,13 @@
 
 #include <Arduino.h>
 #include <M5Unified.h>
-#include "MultipleSatellite.h"  // TinyGPS for AtomS3R
+//#include "MultipleSatellite.h"  // TinyGPS for AtomS3R https://github.com/m5stack/TinyGPSPlus
 
 // Config for communicating with GPS V2 base:
-static const int RXPin = 5, TXPin = 6;  // 6;
+static const int RXPin = 5, TXPin = 6;
 static const uint32_t GPSBaud = 115200;
-const size_t SERIAL_SIZE_RX = 1024;
-MultipleSatellite gps(Serial2, GPSBaud, SERIAL_8N1, RXPin, TXPin);
+HardwareSerial gps(2);
+
 
 // 1 = graphical compass by default, 0 = text UI by default
 #ifndef COMPASS_UI_DEFAULT_GRAPHICS
@@ -23,6 +23,11 @@ MultipleSatellite gps(Serial2, GPSBaud, SERIAL_8N1, RXPin, TXPin);
 // 1 = emit NMEA0183 (HDM + XDR + ROT) like pypilot
 #ifndef COMPASS_SERIAL_NMEA
 #define COMPASS_SERIAL_NMEA 1
+#endif
+
+// used for $xxHDT NMEA messages
+#ifndef INITIAL_VARIATION
+#define INITIAL_VARIATION -9999.9
 #endif
 
 #ifndef COMPASS_NMEA_TALKER
@@ -131,11 +136,8 @@ void gpsEchoLines() {
 
 void setup() {
   g_app.begin();
-  g_app.set_declination(-10.8);
-  gps.begin();
-  //
-  //gps.setRxBufferSize(SERIAL_SIZE_RX);
-  Serial.setRxBufferSize(SERIAL_SIZE_RX);
+  g_app.set_declination(INITIAL_VARIATION);
+  gps.begin(GPSBaud, SERIAL_8N1, RXPin, TXPin);
 }
 void loop() {
   g_app.tick();
